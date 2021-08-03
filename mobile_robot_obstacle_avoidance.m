@@ -126,34 +126,6 @@ function cbf = defineCbf(params, symbolic_state)
     cbf = derivDistance + params.cbf_gamma0 * distance; 
 end
 
-% function obj = defineCbf(params, symbolic_state, f, g)
-%     x = symbolic_state;
-%     f_ = sym(f);
-%     g_ = sym(g);
-%     p_x = x(1); p_y = x(2); theta = x(3);
-%     
-%     %Setting f and g (dynamics)
-%     obj.f = matlabFunction(f_, 'vars', {x});
-%     obj.g = matlabFunction(g_, 'vars', {x});  
-%     
-%     v = params.v;
-%     xo = params.xo;
-%     yo = params.yo;
-%     d = params.d;
-% 
-%     distance = (p_x - xo)^2 + (p_y - yo)^2 - d^2;
-%     dcbf = simplify(jacobian(distance, symbolic_state));
-%     lf_cbf_ = dcbf * f_;
-%     lg_cbf_ = dcbf * g_;      
-%     obj.cbf = matlabFunction(distance, 'vars', {x});
-%     obj.lf_cbf = matlabFunction(lf_cbf_, 'vars', {x});
-%     % TODO: add sanity check of relative degree.
-%     obj.lg_cbf = matlabFunction(lg_cbf_, 'vars', {x});
-%     
-% %     derivDistance = 2*(p_x-xo)*v*cos(theta) + 2*(p_y-yo)*v*sin(theta);
-% %     cbf = derivDistance + params.cbf_gamma0 * distance; 
-% end
-
 function [u, B, feas, comp_time] = ctrlCbfQp(obj, params, x, verbose)
     %% Implementation of vanilla CBF-QP
     % Inputs:   x: state
