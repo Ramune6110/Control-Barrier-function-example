@@ -17,8 +17,8 @@ params.yo = 4;
 params.d = 2;
 params.cbf_gamma0 = 1;
 % Desired target point
-params.xd = 12;
-params.yd = 0;
+params.xd = 20;
+params.yd = 5;
 
 params.clf.rate = 0.5;
 params.weight.slack = 10;
@@ -27,7 +27,8 @@ params.cbf.rate = 10;
 
 [x, f, g] = defineSystem(params);
 cbf = defineCbf(params, x);
-obj = initSys(x, f, g, cbf);
+clf = defineClf(params, x);
+obj = initSys(x, f, g, cbf, clf);
 
 total_k = ceil(sim_t / dt);
 x = x0;
@@ -44,7 +45,8 @@ for k = 1:total_k-1
     t
     % Determine control input.
     % dV_hat: analytic Vdot based on model.
-    [u, slack, h, V] = ctrlCbfQp(obj, params, x, 1);        
+%     [u, slack, h, V] = ctrlCbfQp(obj, params, x, 1);       
+    [u, slack, h, V, feas, comp_time] = ctrlCbfClfQp(obj, params, x, 1, 1);   
     us(k, :) = u';
     hs(k) = h;
     Vs(k) = V;
@@ -60,42 +62,6 @@ for k = 1:total_k-1
 end
 
 plot_results(ts, xs, us, hs, [params.xo;params.yo], params.d)
-
-function obj = initSys(symbolic_x, symbolic_f, symbolic_g, symbolic_cbf)
-    if isempty(symbolic_x) || isempty(symbolic_f) || isempty(symbolic_g)
-        error('x, f, g is empty. Create a class function defineSystem and define your dynamics with symbolic expression.');
-    end
-
-    if ~isa(symbolic_f, 'sym')
-        f_ = sym(symbolic_f);
-    else
-        f_ = symbolic_f;
-    end
-    if ~isa(symbolic_g, 'sym')
-        g_ = sym(symbolic_g);
-    else
-        g_ = symbolic_g;
-    end
-    
-    x = symbolic_x;
-    % Setting state and input dimension.
-    obj.xdim = size(x, 1);
-    obj.udim = size(g_, 2);
-    % Setting f and g (dynamics)
-    obj.f = matlabFunction(f_, 'vars', {x});
-    obj.g = matlabFunction(g_, 'vars', {x});            
-
-    % Obtaining Lie derivatives of CBF.
-    if ~isempty(symbolic_cbf)
-        dcbf = simplify(jacobian(symbolic_cbf, symbolic_x));
-        lf_cbf_ = dcbf * f_;
-        lg_cbf_ = dcbf * g_;        
-        obj.cbf = matlabFunction(symbolic_cbf, 'vars', {x});
-        obj.lf_cbf = matlabFunction(lf_cbf_, 'vars', {x});
-        % TODO: add sanity check of relative degree.
-        obj.lg_cbf = matlabFunction(lg_cbf_, 'vars', {x});
-    end
-end
 
 function [x, f, g] = defineSystem(params)
     syms p_x p_y theta
@@ -124,6 +90,46 @@ function cbf = defineCbf(params, symbolic_state)
     distance = (p_x - xo)^2 + (p_y - yo)^2 - d^2;
     derivDistance = 2*(p_x-xo)*v*cos(theta) + 2*(p_y-yo)*v*sin(theta);
     cbf = derivDistance + params.cbf_gamma0 * distance; 
+end
+
+function clf = defineClf(params, symbolic_state)
+    p_x = symbolic_state(1);
+    p_y = symbolic_state(2);
+    theta = symbolic_state(3);
+    clf = (cos(theta).*(p_y-params.yd)-sin(theta).*(p_x-params.xd)).^2;
+end
+
+function obj = initSys(symbolic_x, symbolic_f, symbolic_g, symbolic_cbf, symbolic_clf)
+    % Dynamics
+    f_ = sym(symbolic_f);
+    g_ = sym(symbolic_g);
+    
+    x = symbolic_x;
+    % Setting state and input dimension.
+    obj.xdim = size(x, 1);
+    obj.udim = size(g_, 2);
+    
+    % Setting f and g (dynamics)
+    obj.f = matlabFunction(f_, 'vars', {x});
+    obj.g = matlabFunction(g_, 'vars', {x});            
+
+    % Obtaining Lie derivatives of CBF.
+    dcbf = simplify(jacobian(symbolic_cbf, symbolic_x));
+    lf_cbf_ = dcbf * f_;
+    lg_cbf_ = dcbf * g_;        
+    obj.cbf = matlabFunction(symbolic_cbf, 'vars', {x});
+    obj.lf_cbf = matlabFunction(lf_cbf_, 'vars', {x});
+    % TODO: add sanity check of relative degree.
+    obj.lg_cbf = matlabFunction(lg_cbf_, 'vars', {x});
+   
+    % Obtaining Lie derivatives of CLF.    
+    dclf = simplify(jacobian(symbolic_clf, symbolic_x));
+    lf_clf_ = dclf * f_;
+    lg_clf_ = dclf * g_;
+    obj.clf = matlabFunction(symbolic_clf, 'vars', {x});                       
+    obj.lf_clf = matlabFunction(lf_clf_, 'vars', {x});
+    % TODO: add sanity check of relative degree.
+    obj.lg_clf = matlabFunction(lg_clf_, 'vars', {x});        
 end
 
 function [u, B, feas, comp_time] = ctrlCbfQp(obj, params, x, verbose)
@@ -190,7 +196,6 @@ function [u, B, feas, comp_time] = ctrlCbfQp(obj, params, x, verbose)
 
     % cost = 0.5 u' H u + f u
     H = weight_input;
-%     H = (x(1) - params.xd)^2 + (x(2) - params.yd)^2;
     f_ = -weight_input * u_ref;
     [u, ~, exitflag, ~] = quadprog(H, f_, A, b, [], [], [], [], [], options);
     if exitflag == -2
@@ -198,6 +203,136 @@ function [u, B, feas, comp_time] = ctrlCbfQp(obj, params, x, verbose)
         disp("Infeasible QP. CBF constraint is conflicting with input constraints.");
     else
         feas = 1;
+    end
+    comp_time = toc(tstart);
+end
+
+%% Author: Jason Choi (jason.choi@berkeley.edu)
+function [u, slack, B, V, feas, comp_time] = ctrlCbfClfQp(obj, params, x, verbose, with_slack)
+    %% Implementation of vanilla CBF-CLF-QP
+    % Inputs:   x: state
+    %           u_ref: reference control input
+    %           with_slack: flag for relaxing the clf constraint(1: relax, 0: hard-constraint)
+    %           verbose: flag for logging (1: print log, 0: run silently)
+    % Outputs:  u: control input as a solution of the CBF-CLF-QP
+    %           slack: slack variable for relaxation. (empty list when with_slack=0)
+    %           B: Value of the CBF at current state.
+    %           V: Value of the CLF at current state.
+    %           feas: 1 if QP is feasible, 0 if infeasible. (Note: even
+    %           when qp is infeasible, u is determined from quadprog.)
+    %           comp_time: computation time to run the solver.
+      
+    u_ref = zeros(obj.udim, 1);
+    
+    tstart = tic;
+    V = obj.clf(x);
+    LfV = obj.lf_clf(x);
+    LgV = obj.lg_clf(x);
+
+    B = obj.cbf(x);
+    LfB = obj.lf_cbf(x);
+    LgB = obj.lg_cbf(x);
+    
+    %% Constraints: A[u; slack] <= b
+    if with_slack
+        % CLF and CBF constraints.
+        A = [LgV, -1;
+            -LgB, 0];
+        b = [-LfV - params.clf.rate * V;
+             LfB + params.cbf.rate * B];                
+        % Add input constraints if u_max or u_min exists.
+        if isfield(params, 'u_max')
+            A = [A; eye(obj.udim), zeros(obj.udim, 1);];
+            if size(params.u_max, 1) == 1
+                b = [b; params.u_max * ones(obj.udim, 1)];
+            elseif size(params.u_max, 1) == obj.udim
+                b = [b; params.u_max];
+            else
+                error("params.u_max should be either a scalar value or an (udim, 1) array.")
+            end
+        end
+        if isfield(params, 'u_min')
+            A = [A; -eye(obj.udim), zeros(obj.udim, 1);];
+            if size(params.u_min, 1) == 1
+                b = [b; -params.u_min * ones(obj.udim, 1)];
+            elseif size(params.u_min, 1) == obj.udim
+                b = [b; -params.u_min];
+            else
+                error("params.u_min should be either a scalar value or an (udim, 1) array")
+            end
+        end        
+    else
+        % CLF and CBF constraints.
+        A = [LgV; -LgB];
+        b = [-LfV - params.clf.rate * V;
+             LfB + params.cbf.rate * B];                
+        % Add input constraints if u_max or u_min exists.
+        if isfield(params, 'u_max')
+            A = [A; eye(obj.udim)];
+            if size(params.u_max, 1) == 1
+                b = [b; params.u_max * ones(obj.udim, 1)];
+            elseif size(params.u_max, 1) == obj.udim
+                b = [b; params.u_max];
+            else
+                error("params.u_max should be either a scalar value or an (udim, 1) array.")
+            end
+        end
+        if isfield(params, 'u_min')
+            A = [A; -eye(obj.udim)];
+            if size(params.u_min, 1) == 1
+                b = [b; -params.u_min * ones(obj.udim, 1)];
+            elseif size(obj.params.u_min, 1) == obj.udim
+                b = [b; -params.u_min];
+            else
+                error("params.u_min should be either a scalar value or an (udim, 1) array")
+            end
+        end
+    end
+
+    %% Cost
+    if isfield(params.weight, 'input')
+        if size(obj.params.weight.input, 1) == 1 
+            weight_input = obj.params.weight.input * eye(obj.udim);
+        elseif all(size(obj.params.weight.input) == obj.udim)
+            weight_input = obj.params.weight.input;
+        else
+            error("params.weight.input should be either a scalar value or an (udim, udim) array.")
+        end
+    else
+        weight_input = eye(obj.udim);
+    end
+    
+    if verbose
+        options =  optimset('Display','notify');
+    else
+        options =  optimset('Display','off');
+    end
+    if with_slack         
+        % cost = 0.5 [u' slack] H [u; slack] + f [u; slack]
+        H = [weight_input, zeros(obj.udim, 1);
+             zeros(1, obj.udim), params.weight.slack];
+        f_ = [-weight_input * u_ref; 0];
+        [u_slack, ~, exitflag, ~] = quadprog(H, f_, A, b, [], [], [], [], [], options);
+        if exitflag == -2
+            feas = 0;
+            disp("Infeasible QP. CBF constraint is conflicting with input constraints.");
+        else
+            feas = 1;
+        end
+        u = u_slack(1:obj.udim);
+        slack = u_slack(end);
+    else
+        % cost = 0.5 u' H u + f u
+        H = weight_input;
+        f_ = -weight_input * u_ref;
+        [u, ~, exitflag, ~] = quadprog(H, f_, A, b, [], [], [], [], [], options);
+        if exitflag == -2
+            feas = 0;
+            disp("Infeasible QP. CBF constraint is conflicting with input constraints.");
+        else
+            feas = 1;
+        end
+        slack = [];
     end
     comp_time = toc(tstart);
 end
